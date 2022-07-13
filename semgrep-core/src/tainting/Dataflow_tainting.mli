@@ -7,6 +7,10 @@ type overlap = float
  * 1.0 means that the AST node matches the annotation perfectly. For
  * practical purposes we can interpret >0.99 as being the same as 1.0. *)
 
+(* TODO: type is_propagator = { froms : var list; tos : var list; }
+ * or if we add 'requires' and 'label' to taint propagators then
+ * type propagor_match = { from : var; to_ : var; spec : Rule.taint_propagator; }
+ * Perhaps declare also 'source_match' and so on. *)
 type propagator_id = var
 type propagator_from = propagator_id
 type propagator_to = propagator_id
@@ -14,7 +18,8 @@ type propagator_to = propagator_id
 type config = {
   filepath : Common.filename;  (** File under analysis, for Deep Semgrep. *)
   rule_id : string;  (** Taint rule id, for Deep Semgrep. *)
-  is_source : AST_generic.any -> (Pattern_match.t * overlap) list;
+  is_source :
+    AST_generic.any -> (Pattern_match.t * overlap * Rule.taint_source) list;
       (** Test whether 'any' is a taint source, this corresponds to
       * 'pattern-sources:' in taint-mode. *)
   is_propagator : AST_generic.any -> propagator_from list * propagator_to list;
@@ -47,7 +52,7 @@ type config = {
        * anyhow it's clearly incorrect to taint `Shell`, so a better solution was
        * needed (hence `pattern-propagators`).
        *)
-  is_sink : AST_generic.any -> Pattern_match.t list;
+  is_sink : AST_generic.any -> (Pattern_match.t * Rule.taint_sink) list;
       (** Test whether 'any' is a sink, this corresponds to 'pattern-sinks:'
       * in taint-mode. *)
   is_sanitizer : AST_generic.any -> (Pattern_match.t * overlap) list;
@@ -70,7 +75,7 @@ type mapping = Taint.taints Dataflow_core.mapping
 (** Mapping from variables to taint sources (if the variable is tainted).
   * If a variable is not in the map, then it's not tainted. *)
 
-type fun_env = (var, Pattern_match.Set.t) Hashtbl.t
+type fun_env = (var, Taint.Taint_set.t) Hashtbl.t
 (** Set of functions known to act as taint sources (their output is
   * tainted). This is used for a HACK to do some poor-man's intrafile
   * interprocedural taint tracking. TO BE DEPRECATED. *)

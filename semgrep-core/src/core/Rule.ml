@@ -165,6 +165,7 @@ type pformula = New of formula | Old of formula_old [@@deriving show, eq]
 (* Taint-specific types *)
 (*****************************************************************************)
 
+(* TODO: RENAMING: taint_sanitizer, formula *)
 type sanitizer_spec = {
   not_conflicting : bool;
       (** If [not_conflicting] is enabled, the sanitizer cannot conflict with
@@ -174,6 +175,23 @@ type sanitizer_spec = {
     Without this, `$F(...)` would automatically sanitize any other function
     call acting as a sink or a source. *)
   pformula : pformula;
+}
+[@@deriving show]
+
+type taint_source = {
+  formula : pformula;
+  label : string;  (** The label to attach to the data *)
+  requires : AST_generic.expr;
+      (** A Boolean formula over taint labels, the expression that
+       is being checked as a source must satisfy this in order to the
+       label to be produced. Note that with 'requires' a taint source
+       behaves a bit like a propagator ... *)
+}
+[@@deriving show]
+
+type taint_sink = {
+  formula : pformula;  (** A Boolean formula over taint labels. *)
+  requires : AST_generic.expr;
 }
 [@@deriving show]
 
@@ -189,10 +207,10 @@ type taint_propagator = {
  * will also be marked as tainted. *)
 
 type taint_spec = {
-  sources : pformula list;
+  sources : taint_source list;
   propagators : taint_propagator list;
   sanitizers : sanitizer_spec list;
-  sinks : pformula list;
+  sinks : taint_sink list;
 }
 [@@deriving show]
 

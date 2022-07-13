@@ -19,6 +19,7 @@ module F = IL
 module D = Dataflow_core
 module VarMap = Dataflow_core.VarMap
 module PM = Pattern_match
+module R = Rule
 module LV = IL_lvalue_helpers
 module T = Taint
 module Taints = T.Taint_set
@@ -62,9 +63,9 @@ type propagator_to = propagator_id
 type config = {
   filepath : Common.filename;
   rule_id : string;
-  is_source : G.any -> (PM.t * overlap) list;
+  is_source : G.any -> (PM.t * overlap * R.taint_source) list;
   is_propagator : AST_generic.any -> propagator_from list * propagator_to list;
-  is_sink : G.any -> PM.t list;
+  is_sink : G.any -> (PM.t * R.taint_sink) list;
   is_sanitizer : G.any -> (PM.t * overlap) list;
   unify_mvars : bool;
   handle_findings :
@@ -74,7 +75,7 @@ type config = {
 type mapping = Taints.t Dataflow_core.mapping
 
 (* HACK: Tracks tainted functions intrafile. *)
-type fun_env = (var, PM.Set.t) Hashtbl.t
+type fun_env = (var, Taints.t) Hashtbl.t
 type var_env = Taints.t VarMap.t
 
 type env = {
@@ -160,23 +161,70 @@ let merge_source_sink_mvars env source_mvars sink_mvars =
     (* The union of both sets, but taking the sink mvars in case of collision. *)
     sink_biased_union_mvars source_mvars sink_mvars
 
+let labels_in_taint taints : string list =
+  taints |> Taints.elements
+  |> List.filter_map (fun (t : T.taint) ->
+         match t.orig with
+         | Src src ->
+             let _, ts = T.pm_of_trace src in
+             Some ts.Rule.label
+         | Arg _ -> None)
+
+(* FIXME: StrSet ? *)
+let rec eval_label_requires ~labels e =
+  match e.G.e with
+  | G.L (G.Bool (v, _)) -> v
+  | G.N (G.Id (id, _)) ->
+      let str, _ = id in
+      List.mem str labels
+  | G.Call ({ e = G.IdSpecial (G.Op G.Not, _); _ }, (_, [ Arg e1 ], _)) ->
+      not (eval_label_requires ~labels e1)
+  | G.Call ({ e = G.IdSpecial (G.Op op, _); _ }, (_, args, _)) -> (
+      match (op, eval_label_args ~labels args) with
+      | G.And, xs -> List.fold_left ( && ) true xs
+      | G.Or, xs -> List.fold_left ( || ) false xs
+      | _ ->
+          logger#error "Unexpected Boolean operator";
+          false)
+  | _else ->
+      logger#error "Unexpected `requires' expression";
+      false
+
+and eval_label_args ~labels args =
+  match args with
+  | [] -> []
+  | G.Arg e :: args' ->
+      eval_label_requires ~labels e :: eval_label_args ~labels args'
+  | _ :: args' ->
+      logger#error "Unexpected argument kind";
+      false :: eval_label_args ~labels args'
+
 (* Produces a finding for every taint source that is unifiable with the sink. *)
 let findings_of_tainted_sink env taints (sink : T.sink) : T.finding list =
   let ( let* ) = Option.bind in
-  taints |> Taints.elements
-  |> List.filter_map (fun (taint : T.taint) ->
-         let tokens = List.rev taint.tokens in
-         match taint.orig with
-         | Arg i ->
-             (* We need to check unifiability at the call site. *)
-             Some (T.ArgToSink (i, tokens, sink))
-         | Src source ->
-             let src_pm = T.pm_of_trace source in
-             let sink_pm = T.pm_of_trace sink in
-             let* merged_env =
-               merge_source_sink_mvars env sink_pm.PM.env src_pm.PM.env
-             in
-             Some (T.SrcToSink { source; tokens; sink; merged_env }))
+  let labels = labels_in_taint taints in
+  let sink_pm, ts = T.pm_of_trace sink in
+  let req = eval_label_requires ~labels ts.requires in
+  if req then
+    (* TODO: With taint labels it's less clear what is "the source",
+     * in fact, there could be many sources, each one providing a
+     * different label. Here these would be reported as different
+     * findings... We would need to compute subsets of taints satisfying
+     * the `requires`, and then have multiple sources in `SrcToSink`! *)
+    taints |> Taints.elements
+    |> List.filter_map (fun (taint : T.taint) ->
+           let tokens = List.rev taint.tokens in
+           match taint.orig with
+           | Arg i ->
+               (* We need to check unifiability at the call site. *)
+               Some (T.ArgToSink (i, tokens, sink))
+           | Src source ->
+               let src_pm, _ = T.pm_of_trace source in
+               let* merged_env =
+                 merge_source_sink_mvars env sink_pm.PM.env src_pm.PM.env
+               in
+               Some (T.SrcToSink { source; tokens; sink; merged_env }))
+  else []
 
 (* Produces a finding for every unifiable source-sink pair. *)
 let findings_of_tainted_sinks env taints sinks : T.finding list =
@@ -189,6 +237,18 @@ let findings_of_tainted_return taints return_tok : T.finding list =
          match taint.orig with
          | T.Arg i -> T.ArgToReturn (i, tokens, return_tok)
          | T.Src src -> T.SrcToReturn (src, tokens, return_tok))
+
+let union_taints_filtering_labels ~new_ curr =
+  let labels = labels_in_taint curr in
+  Taints.fold
+    (fun new_taint taints ->
+      match new_taint.orig with
+      | Arg _ -> Taints.add new_taint taints
+      | Src src ->
+          let _, ts = T.pm_of_trace src in
+          let req = eval_label_requires ~labels ts.requires in
+          if req then Taints.add new_taint taints else taints)
+    new_ curr
 
 (*****************************************************************************)
 (* Tainted *)
@@ -304,29 +364,32 @@ let check_tainted_var env (var : IL.name) : Taints.t * var_env =
          * (presumably by side-effect) and we will update the `var_env`
          * accordingly. Otherwise the variable belongs to a piece of code that
          * is a source of taint, but it is not tainted on its own. *)
-        List.partition (fun (_pm, o) -> o > 0.99) source_pms
+        List.partition (fun (_pm, o, _) -> o > 0.99) source_pms
       in
       let taints_sources_reg =
-        reg_source_pms |> Common.map fst |> T.taints_of_pms
+        reg_source_pms
+        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
+        |> T.taints_of_pms
       and taints_sources_mut =
-        mut_source_pms |> Common.map fst |> T.taints_of_pms
+        mut_source_pms
+        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
+        |> T.taints_of_pms
       and taints_var_env =
         VarMap.find_opt (str_of_name var) env.var_env
         |> Option.value ~default:Taints.empty
       and taints_fun_env =
         (* TODO: Move this to check_tainted_instr ? *)
         Hashtbl.find_opt env.fun_env (str_of_name var)
-        |> Option.value ~default:PM.Set.empty
-        |> PM.Set.elements |> T.taints_of_pms
+        |> Option.value ~default:Taints.empty
       in
       let var_env' =
         add_taint_to_var_in_env env.var_env var taints_sources_mut
       in
       let taints_sources = Taints.union taints_sources_reg taints_sources_mut in
       let taints : Taints.t =
-        taints_sources
-        |> Taints.union taints_var_env
+        taints_var_env
         |> Taints.union taints_fun_env
+        |> union_taints_filtering_labels ~new_:taints_sources
       in
       let taints, var_env' =
         handle_taint_propagators
@@ -359,8 +422,7 @@ let rec check_tainted_expr env exp : Taints.t * var_env =
         (* TODO: Move this to check_tainted_instr ? *)
         let taints =
           Hashtbl.find_opt env.fun_env (str_of_name fld)
-          |> Option.value ~default:PM.Set.empty
-          |> PM.Set.elements |> T.taints_of_pms
+          |> Option.value ~default:Taints.empty
         in
         (taints, env.var_env)
     | Fetch { base; offset; _ } ->
@@ -392,10 +454,14 @@ let rec check_tainted_expr env exp : Taints.t * var_env =
         orig_is_sink env.config exp.eorig |> Common.map T.trace_of_pm
       in
       let taints_sources =
-        orig_is_source env.config exp.eorig |> Common.map fst |> T.taints_of_pms
+        orig_is_source env.config exp.eorig
+        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
+        |> T.taints_of_pms
       in
       let taints_exp, var_env = check_subexpr exp in
-      let taints = taints_sources |> Taints.union taints_exp in
+      let taints =
+        taints_exp |> union_taints_filtering_labels ~new_:taints_sources
+      in
       let taints, var_env =
         handle_taint_propagators { env with var_env } (`Exp exp) taints
       in
@@ -511,10 +577,13 @@ let check_tainted_instr env instr : Taints.t * var_env =
       in
       let taint_sources =
         orig_is_source env.config instr.iorig
-        |> Common.map fst |> T.taints_of_pms
+        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
+        |> T.taints_of_pms
       in
       let taints_instr, var_env' = check_instr instr.i in
-      let taints = taint_sources |> Taints.union taints_instr in
+      let taints =
+        taints_instr |> union_taints_filtering_labels ~new_:taint_sources
+      in
       let taints, var_env' =
         handle_taint_propagators
           { env with var_env = var_env' }
@@ -594,22 +663,21 @@ let (transfer :
         let findings = findings_of_tainted_return taints tok in
         report_findings env findings;
         let pmatches =
-          taints |> Taints.elements
-          |> List.filter_map (fun (taint : T.taint) ->
+          taints
+          |> Taints.filter (fun taint ->
                  match taint.T.orig with
-                 | T.Src src -> Some (T.pm_of_trace src)
-                 | T.Arg _ -> None)
-          |> PM.Set.of_list
+                 | T.Src _ -> true
+                 | T.Arg _ -> false)
         in
         match opt_name with
         | Some var ->
             (let str = var in
              match Hashtbl.find_opt fun_env str with
              | None ->
-                 if not (PM.Set.is_empty pmatches) then
+                 if not (Taints.is_empty pmatches) then
                    Hashtbl.add fun_env str pmatches
              | Some tained' ->
-                 Hashtbl.replace fun_env str (PM.Set.union pmatches tained'));
+                 Hashtbl.replace fun_env str (Taints.union pmatches tained'));
             var_env'
         | None -> var_env')
     | _ -> in'
