@@ -123,8 +123,24 @@ type propagator_match = {
 (* Finding matches for taint specs *)
 (*****************************************************************************)
 
+let find_range_w_metas config equivs xtarget rule specs =
+  (* TODO: Make an Or formula and run a single query. *)
+  (* if perf is a problem, we could build an interval set here *)
+  specs
+  |> List.concat_map (fun (pf, x) ->
+         range_w_metas_of_pformula config equivs xtarget rule pf
+         |> List.map (fun rwm -> (rwm, x)))
+
+let find_sanitizers_matches config equivs xtarget rule specs =
+  specs
+  |> List.concat_map (fun sanitizer ->
+         Common.map
+           (fun pf -> (sanitizer.Rule.not_conflicting, pf))
+           (range_w_metas_of_pformula config equivs xtarget rule
+              sanitizer.formula))
+
 (* Finds all matches of `pattern-propagators`. *)
-let find_propagators_ranges config equivs xtarget rule propagators_spec =
+let find_propagators_matches config equivs xtarget rule propagators_spec =
   let ( let* ) = Option.bind in
   let module MV = Metavariable in
   propagators_spec
@@ -298,35 +314,19 @@ let taint_config_of_rule default_config equivs file ast_and_errors
       lazy_ast_and_errors;
     }
   in
-  let find_range_w_metas specs =
-    (* TODO: Make an Or formula and run a single query. *)
-    (* if perf is a problem, we could build an interval set here *)
-    specs
-    |> List.concat_map (fun (pf, x) ->
-           range_w_metas_of_pformula config equivs xtarget rule pf
-           |> List.map (fun rwm -> (rwm, x)))
-  in
-  let find_range_w_metas_santizers specs =
-    specs
-    |> List.concat_map (fun sanitizer ->
-           Common.map
-             (fun pf -> (sanitizer.Rule.not_conflicting, pf))
-             (range_w_metas_of_pformula config equivs xtarget rule
-                sanitizer.formula))
-  in
   let sources_ranges =
-    find_range_w_metas
+    find_range_w_metas config equivs xtarget rule
       (spec.sources
       |> List.map (fun (src : Rule.taint_source) -> (src.formula, src)))
   and propagators_ranges =
-    find_propagators_ranges config equivs xtarget rule spec.propagators
+    find_propagators_matches config equivs xtarget rule spec.propagators
   and sinks_ranges =
-    find_range_w_metas
+    find_range_w_metas config equivs xtarget rule
       (spec.sinks
       |> List.map (fun (sink : Rule.taint_sink) -> (sink.formula, sink)))
   in
   let sanitizers_ranges =
-    find_range_w_metas_santizers spec.sanitizers
+    find_sanitizers_matches config equivs xtarget rule spec.sanitizers
     (* A sanitizer cannot conflict with a sink or a source, otherwise it is
      * filtered out. This allows to e.g. declare `$F(...)` as a sanitizer,
      * to assume that any other function will handle tainted data safely.
@@ -424,7 +424,7 @@ let check_fundef lang fun_env taint_config opt_ent fdef =
     let var = D.str_of_name (AST_to_IL.var_of_id_info id ii) in
     let taint =
       taint_config.D.is_source (G.Tk (snd id))
-      |> Common.map (fun (pm, _o, ts) -> (pm, ts))
+      |> Common.map (fun (pm, _overlap, ts) -> (pm, ts))
       |> T.taints_of_pms
     in
     Dataflow_core.VarMap.add var taint env
