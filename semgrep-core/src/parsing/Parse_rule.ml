@@ -799,6 +799,8 @@ let parse_extract_reduction ~id (s, t) =
 (* Sub parsers taint *)
 (*****************************************************************************)
 
+let builtin_label_SOURCE = "__SOURCE__"
+
 let parse_formula (env : env) (rule_dict : dict) : R.pformula =
   match Hashtbl.find_opt rule_dict.h "match" with
   | Some (_matchkey, v) -> R.New (parse_formula_new env v)
@@ -809,7 +811,28 @@ let parse_formula (env : env) (rule_dict : dict) : R.pformula =
       R.Old old
 
 let parse_taint_requires env key x =
-  let check _ = () (* TODO *) in
+  let parse_error () =
+    error_at_key env key "Expected a Boolean (Python) expression over labels"
+  in
+  let rec check e =
+    match e.G.e with
+    | G.L (G.Bool (_v, _)) -> ()
+    | G.N (G.Id ((str, _), _)) when Metavariable.is_metavar_name str ->
+        error_at_key env key ("Metavariables cannot be used as labels: " ^ str)
+    | G.N (G.Id (_id, _)) -> ()
+    | G.Call ({ e = G.IdSpecial (G.Op G.Not, _); _ }, (_, [ Arg _e1 ], _)) -> ()
+    | G.Call ({ e = G.IdSpecial (G.Op op, _); _ }, (_, args, _)) -> (
+        List.iter check_arg args;
+        match op with
+        | G.And
+        | G.Or ->
+            ()
+        | _ -> parse_error ())
+    | ___else__ -> parse_error ()
+  and check_arg = function
+    | G.Arg e -> check e
+    | __else_ -> parse_error ()
+  in
   let s = parse_string env key x in
   let e = parse_python_expression env key s in
   check e;
@@ -819,7 +842,7 @@ let parse_taint_source env (key : key) (value : G.expr) : Rule.taint_source =
   let source_dict = yaml_to_dict env key value in
   let label =
     take_opt source_dict env parse_string "label"
-    |> Option.value ~default:"__SOURCE"
+    |> Option.value ~default:builtin_label_SOURCE
   in
   let requires =
     let tok = snd key in
@@ -852,7 +875,8 @@ let parse_taint_sink env (key : key) (value : G.expr) : Rule.taint_sink =
     let tok = snd key in
     take_opt sink_dict env parse_taint_requires "requires"
     |> Option.value
-         ~default:(G.N (G.Id (("__SOURCE", tok), G.empty_id_info ())) |> G.e)
+         ~default:
+           (G.N (G.Id ((builtin_label_SOURCE, tok), G.empty_id_info ())) |> G.e)
   in
   let formula = parse_formula env sink_dict in
   { formula; requires }
