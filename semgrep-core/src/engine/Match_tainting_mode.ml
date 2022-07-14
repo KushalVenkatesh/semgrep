@@ -114,8 +114,10 @@ type propagator_match = {
   id : D.var;
       (** An unique identifier for the propagator match. This is used as an
    * auxiliary variable to store the taints flowing from `from` to `to`. *)
+  rwm : RM.t;
   from : Range.t;  (** The range matched by the `from` metavariable. *)
   to_ : Range.t;  (** The range matched by the `to` metavariable. *)
+  spec : Rule.taint_propagator;
 }
 (** Taint will flow from `from` to `to_` through the axiliary variable `id`. *)
 
@@ -129,13 +131,13 @@ let find_range_w_metas config equivs xtarget rule specs =
   specs
   |> List.concat_map (fun (pf, x) ->
          range_w_metas_of_pformula config equivs xtarget rule pf
-         |> List.map (fun rwm -> (rwm, x)))
+         |> Common.map (fun rwm -> (rwm, x)))
 
 let find_sanitizers_matches config equivs xtarget rule specs =
   specs
   |> List.concat_map (fun sanitizer ->
          Common.map
-           (fun pf -> (sanitizer.Rule.not_conflicting, pf))
+           (fun pf -> (sanitizer.Rule.not_conflicting, pf, sanitizer))
            (range_w_metas_of_pformula config equivs xtarget rule
               sanitizer.formula))
 
@@ -199,7 +201,7 @@ let find_propagators_matches config equivs xtarget rule propagators_spec =
                         loc_pfrom.charpos loc_pto.charpos from.Range.start
                         from.Range.end_ to_.Range.start to_.Range.end_
                     in
-                    Some { id; from; to_ }))
+                    Some { id; rwm; from; to_; spec = p }))
 
 (*****************************************************************************)
 (* Testing whether some matches a taint spec *)
@@ -253,37 +255,42 @@ let any_is_in_sources_matches rule any matches =
          if Range.( $<=$ ) r rwm.RM.r then
            Some
              (let pm = RM.range_to_pattern_match_adjusted rule rwm in
-              (pm, overlap_with ~match_range:rwm.RM.r r, ts))
+              let overlap = overlap_with ~match_range:rwm.RM.r r in
+              { D.spec = ts; pm; overlap })
          else None)
 
 (* Check whether `any` matches either the `from` or the `to` of any of the
  * `pattern-propagators`. Matches must be exact (overlap > 0.99) to make
  * taint propagation more precise and predictable. *)
-let any_is_in_propagators_matches any matches :
-    D.propagator_from list * D.propagator_to list =
+let any_is_in_propagators_matches rule any matches :
+    D.is_a_propagator D.is_a list =
   match range_of_any any with
-  | None -> ([], [])
+  | None -> []
   | Some r ->
-      let in_matches ~get_range =
-        matches
-        |> List.filter_map (fun prop_match ->
-               if is_exact_match ~match_range:(get_range prop_match) r then
-                 Some prop_match.id
-               else None)
-      in
-      let matches_pfrom = in_matches ~get_range:(fun x -> x.from) in
-      let matches_pto = in_matches ~get_range:(fun x -> x.to_) in
-      (matches_pfrom, matches_pto)
+      matches
+      |> List.concat_map (fun prop ->
+             let var = prop.id in
+             let pm = RM.range_to_pattern_match_adjusted rule prop.rwm in
+             let is_from = is_exact_match ~match_range:prop.from r in
+             let is_to = is_exact_match ~match_range:prop.to_ r in
+             let mk_match kind =
+               let spec : D.is_a_propagator = { kind; prop = prop.spec; var } in
+               { D.spec; pm; overlap = 1.0 }
+             in
+             (if is_from then [ mk_match `From ] else [])
+             @ (if is_to then [ mk_match `To ] else [])
+             @ [])
 
 let any_is_in_sanitizers_matches rule any matches =
   let ( let* ) = option_bind_list in
   let* r = range_of_any any in
   matches
-  |> List.filter_map (fun rwm ->
+  |> List.filter_map (fun (rwm, spec) ->
          if Range.( $<=$ ) r rwm.RM.r then
            Some
              (let pm = RM.range_to_pattern_match_adjusted rule rwm in
-              (pm, overlap_with ~match_range:rwm.RM.r r))
+              let overlap = overlap_with ~match_range:rwm.RM.r r in
+              { D.spec; pm; overlap })
          else None)
 
 let any_is_in_sinks_matches rule any matches =
@@ -292,7 +299,10 @@ let any_is_in_sinks_matches rule any matches =
   matches
   |> List.filter_map (fun (rwm, spec) ->
          if Range.( $<=$ ) r rwm.RM.r then
-           Some (RM.range_to_pattern_match_adjusted rule rwm, spec)
+           Some
+             (let pm = RM.range_to_pattern_match_adjusted rule rwm in
+              let overlap = overlap_with ~match_range:rwm.RM.r r in
+              { D.spec; pm; overlap })
          else None)
 
 let lazy_force x = Lazy.force x [@@profiling]
@@ -332,7 +342,7 @@ let taint_config_of_rule default_config equivs file ast_and_errors
      * to assume that any other function will handle tainted data safely.
      * Without this, `$F(...)` will automatically sanitize any other function
      * call acting as a sink or a source. *)
-    |> List.filter_map (fun (not_conflicting, range) ->
+    |> List.filter_map (fun (not_conflicting, range, spec) ->
            (* TODO: Warn user when we filter out a sanitizer? *)
            if not_conflicting then
              if
@@ -343,16 +353,16 @@ let taint_config_of_rule default_config equivs file ast_and_errors
                  || List.exists
                       (fun (range', _) -> range'.RM.r = range.RM.r)
                       sources_ranges)
-             then Some range
+             then Some (range, spec)
              else None
-           else Some range)
+           else Some (range, spec))
   in
   ( {
       Dataflow_tainting.filepath = file;
       rule_id = fst rule.R.id;
       is_source = (fun x -> any_is_in_sources_matches rule x sources_ranges);
       is_propagator =
-        (fun x -> any_is_in_propagators_matches x propagators_ranges);
+        (fun x -> any_is_in_propagators_matches rule x propagators_ranges);
       is_sanitizer =
         (fun x -> any_is_in_sanitizers_matches rule x sanitizers_ranges);
       is_sink = (fun x -> any_is_in_sinks_matches rule x sinks_ranges);
@@ -361,7 +371,7 @@ let taint_config_of_rule default_config equivs file ast_and_errors
     },
     {
       sources = sources_ranges;
-      sanitizers = sanitizers_ranges;
+      sanitizers = sanitizers_ranges |> Common.map fst;
       sinks = sinks_ranges;
     } )
 
@@ -424,7 +434,7 @@ let check_fundef lang fun_env taint_config opt_ent fdef =
     let var = D.str_of_name (AST_to_IL.var_of_id_info id ii) in
     let taint =
       taint_config.D.is_source (G.Tk (snd id))
-      |> Common.map (fun (pm, _overlap, ts) -> (pm, ts))
+      |> Common.map (fun (x : _ D.is_a) -> (x.pm, x.spec))
       |> T.taints_of_pms
     in
     Dataflow_core.VarMap.add var taint env

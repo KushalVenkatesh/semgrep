@@ -56,17 +56,21 @@ end)
 
 type var = Dataflow_core.var
 type overlap = float
-type propagator_id = var
-type propagator_from = propagator_id
-type propagator_to = propagator_id
+type 'spec is_a = { spec : 'spec; pm : PM.t; overlap : overlap }
+
+type is_a_propagator = {
+  kind : [ `From | `To ];
+  prop : R.taint_propagator;
+  var : var;
+}
 
 type config = {
   filepath : Common.filename;
   rule_id : string;
-  is_source : G.any -> (PM.t * overlap * R.taint_source) list;
-  is_propagator : AST_generic.any -> propagator_from list * propagator_to list;
-  is_sink : G.any -> (PM.t * R.taint_sink) list;
-  is_sanitizer : G.any -> (PM.t * overlap) list;
+  is_source : G.any -> Rule.taint_source is_a list;
+  is_propagator : AST_generic.any -> is_a_propagator is_a list;
+  is_sink : G.any -> R.taint_sink is_a list;
+  is_sanitizer : G.any -> R.taint_sanitizer is_a list;
   unify_mvars : bool;
   handle_findings :
     var option -> T.finding list -> Taints.t Dataflow_core.env -> unit;
@@ -117,6 +121,10 @@ let str_of_name name = spf "%s:%d" (fst name.ident) name.sid
 let orig_is_source config orig = config.is_source (any_of_orig orig)
 let orig_is_sanitized config orig = config.is_sanitizer (any_of_orig orig)
 let orig_is_sink config orig = config.is_sink (any_of_orig orig)
+let trace_of_is_a x = T.trace_of_pm (x.pm, x.spec)
+
+let taints_of_is_as xs =
+  xs |> Common.map (fun x -> (x.pm, x.spec)) |> T.taints_of_pms
 
 let report_findings env findings =
   if findings <> [] then
@@ -260,7 +268,7 @@ let sanitize_var var_env sanitizer_pms var =
        * annotation, then we infer that the variable itself has been updated
        * (presumably by side-effect) and is no longer tainted. We will update
        * the environment (i.e., `var_env') accordingly. *)
-    List.exists (fun (_pm, o) -> o > 0.99) sanitizer_pms
+    List.exists (fun x -> x.overlap > 0.99) sanitizer_pms
   in
   if var_is_now_safe then VarMap.remove (str_of_name var) var_env else var_env
 
@@ -301,29 +309,34 @@ let handle_taint_propagators env x taints =
    * `z` to `x`, or from `y` to `z`; but we cannot propagate taint from `x` to
    * `y` or `z`, or from `z` to `y`. *)
   let var_env = env.var_env in
-  let propagate_froms, propagate_tos =
+  let propagators =
     match x with
     | `Var var ->
         let _, tok = var.ident in
         if Parse_info.is_origintok tok then env.config.is_propagator (G.Tk tok)
-        else ([], [])
+        else []
     | `Exp exp -> env.config.is_propagator (any_of_orig exp.eorig)
     | `Ins ins -> env.config.is_propagator (any_of_orig ins.iorig)
+  in
+  let propagate_froms, propagate_tos =
+    List.partition (fun p -> p.spec.kind = `From) propagators
   in
   let var_env =
     (* `x` is the source (the "from") of propagation, we add its taints to
      * the environment. *)
     List.fold_left
-      (fun var_env strid -> add_taint_to_strid_in_env var_env strid taints)
+      (fun var_env prop ->
+        add_taint_to_strid_in_env var_env prop.spec.var taints)
       var_env propagate_froms
   in
   let taints_incoming =
     (* `x` is the destination (the "to") of propagation. we collect all the
      * incoming taints by looking for the propagator ids in the environment. *)
     List.fold_left
-      (fun taints_in_acc strid ->
+      (fun taints_in_acc prop ->
         let taints_strid =
-          VarMap.find_opt strid var_env |> Option.value ~default:Taints.empty
+          VarMap.find_opt prop.spec.var var_env
+          |> Option.value ~default:Taints.empty
         in
         Taints.union taints_in_acc taints_strid)
       Taints.empty propagate_tos
@@ -364,16 +377,10 @@ let check_tainted_var env (var : IL.name) : Taints.t * var_env =
          * (presumably by side-effect) and we will update the `var_env`
          * accordingly. Otherwise the variable belongs to a piece of code that
          * is a source of taint, but it is not tainted on its own. *)
-        List.partition (fun (_pm, o, _) -> o > 0.99) source_pms
+        List.partition (fun src -> src.overlap > 0.99) source_pms
       in
-      let taints_sources_reg =
-        reg_source_pms
-        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
-        |> T.taints_of_pms
-      and taints_sources_mut =
-        mut_source_pms
-        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
-        |> T.taints_of_pms
+      let taints_sources_reg = reg_source_pms |> taints_of_is_as
+      and taints_sources_mut = mut_source_pms |> taints_of_is_as
       and taints_var_env =
         VarMap.find_opt (str_of_name var) env.var_env
         |> Option.value ~default:Taints.empty
@@ -396,7 +403,7 @@ let check_tainted_var env (var : IL.name) : Taints.t * var_env =
           { env with var_env = var_env' }
           (`Var var) taints
       in
-      let sinks = sink_pms |> Common.map T.trace_of_pm in
+      let sinks = sink_pms |> Common.map trace_of_is_a in
       let findings = findings_of_tainted_sinks env taints sinks in
       report_findings env findings;
       (taints, var_env')
@@ -451,12 +458,10 @@ let rec check_tainted_expr env exp : Taints.t * var_env =
       (Taints.empty, var_env)
   | None ->
       let sinks =
-        orig_is_sink env.config exp.eorig |> Common.map T.trace_of_pm
+        orig_is_sink env.config exp.eorig |> Common.map trace_of_is_a
       in
       let taints_sources =
-        orig_is_source env.config exp.eorig
-        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
-        |> T.taints_of_pms
+        orig_is_source env.config exp.eorig |> taints_of_is_as
       in
       let taints_exp, var_env = check_subexpr exp in
       let taints =
@@ -573,12 +578,10 @@ let check_tainted_instr env instr : Taints.t * var_env =
       (Taints.empty, env.var_env)
   | [] ->
       let sinks =
-        orig_is_sink env.config instr.iorig |> Common.map T.trace_of_pm
+        orig_is_sink env.config instr.iorig |> Common.map trace_of_is_a
       in
       let taint_sources =
-        orig_is_source env.config instr.iorig
-        |> Common.map (fun (pm, _o, ts) -> (pm, ts))
-        |> T.taints_of_pms
+        orig_is_source env.config instr.iorig |> taints_of_is_as
       in
       let taints_instr, var_env' = check_instr instr.i in
       let taints =
@@ -598,7 +601,7 @@ let check_tainted_instr env instr : Taints.t * var_env =
 let check_tainted_return env tok e : Taints.t * var_env =
   let sinks =
     env.config.is_sink (G.Tk tok) @ orig_is_sink env.config e.eorig
-    |> Common.map T.trace_of_pm
+    |> Common.map trace_of_is_a
   in
   let taints, var_env' = check_tainted_expr env e in
   let findings = findings_of_tainted_sinks env taints sinks in

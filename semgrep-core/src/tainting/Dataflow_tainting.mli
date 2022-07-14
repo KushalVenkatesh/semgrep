@@ -7,22 +7,21 @@ type overlap = float
  * 1.0 means that the AST node matches the annotation perfectly. For
  * practical purposes we can interpret >0.99 as being the same as 1.0. *)
 
-(* TODO: type is_propagator = { froms : var list; tos : var list; }
- * or if we add 'requires' and 'label' to taint propagators then
- * type propagor_match = { from : var; to_ : var; spec : Rule.taint_propagator; }
- * Perhaps declare also 'source_match' and so on. *)
-type propagator_id = var
-type propagator_from = propagator_id
-type propagator_to = propagator_id
+type 'spec is_a = { spec : 'spec; pm : Pattern_match.t; overlap : overlap }
+
+type is_a_propagator = {
+  kind : [ `From | `To ];
+  prop : Rule.taint_propagator;
+  var : var; (* REMOVE USE prop.id *)
+}
 
 type config = {
   filepath : Common.filename;  (** File under analysis, for Deep Semgrep. *)
   rule_id : string;  (** Taint rule id, for Deep Semgrep. *)
-  is_source :
-    AST_generic.any -> (Pattern_match.t * overlap * Rule.taint_source) list;
+  is_source : AST_generic.any -> Rule.taint_source is_a list;
       (** Test whether 'any' is a taint source, this corresponds to
       * 'pattern-sources:' in taint-mode. *)
-  is_propagator : AST_generic.any -> propagator_from list * propagator_to list;
+  is_propagator : AST_generic.any -> is_a_propagator is_a list;
       (** Test whether 'any' matches a taint propagator, this corresponds to
        * 'pattern-propagators:' in taint-mode.
        *
@@ -52,10 +51,10 @@ type config = {
        * anyhow it's clearly incorrect to taint `Shell`, so a better solution was
        * needed (hence `pattern-propagators`).
        *)
-  is_sink : AST_generic.any -> (Pattern_match.t * Rule.taint_sink) list;
+  is_sink : AST_generic.any -> Rule.taint_sink is_a list;
       (** Test whether 'any' is a sink, this corresponds to 'pattern-sinks:'
       * in taint-mode. *)
-  is_sanitizer : AST_generic.any -> (Pattern_match.t * overlap) list;
+  is_sanitizer : AST_generic.any -> Rule.taint_sanitizer is_a list;
       (** Test whether 'any' is a sanitizer, this corresponds to
       * 'pattern-sanitizers:' in taint-mode. *)
   unify_mvars : bool;  (** Unify metavariables in sources and sinks? *)
