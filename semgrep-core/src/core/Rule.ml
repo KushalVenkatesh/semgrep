@@ -165,19 +165,6 @@ type pformula = New of formula | Old of formula_old [@@deriving show, eq]
 (* Taint-specific types *)
 (*****************************************************************************)
 
-(* TODO: RENAMING: taint_sanitizer, formula *)
-type sanitizer_spec = {
-  not_conflicting : bool;
-      (** If [not_conflicting] is enabled, the sanitizer cannot conflict with
-    a sink or a source (i.e., match the exact same range) otherwise
-    it is filtered out. This allows to e.g. declare `$F(...)` as a sanitizer,
-    to assume that any other function will handle tainted data safely.
-    Without this, `$F(...)` would automatically sanitize any other function
-    call acting as a sink or a source. *)
-  pformula : pformula;
-}
-[@@deriving show]
-
 type taint_source = {
   formula : pformula;
   label : string;  (** The label to attach to the data *)
@@ -189,9 +176,19 @@ type taint_source = {
 }
 [@@deriving show]
 
-type taint_sink = {
-  formula : pformula;  (** A Boolean formula over taint labels. *)
-  requires : AST_generic.expr;
+type taint_sanitizer = {
+  not_conflicting : bool;
+      (** If [not_conflicting] is enabled, the sanitizer cannot conflict with
+    a sink or a source (i.e., match the exact same range) otherwise
+    it is filtered out. This allows to e.g. declare `$F(...)` as a sanitizer,
+    to assume that any other function will handle tainted data safely.
+    Without this, `$F(...)` would automatically sanitize any other function
+    call acting as a sink or a source.
+
+    THINK: In retrospective, I'm not sure this was a good idea. We should add
+    an option to disable the assumption that function calls always propagate
+    taint, and deprecate not-conflicting sanitizers. *)
+  formula : pformula;
 }
 [@@deriving show]
 
@@ -206,10 +203,16 @@ type taint_propagator = {
  * with "from" being `$X` and "to" being `$H`. So if `$X` is tainted then `$H`
  * will also be marked as tainted. *)
 
+type taint_sink = {
+  formula : pformula;  (** A Boolean formula over taint labels. *)
+  requires : AST_generic.expr;
+}
+[@@deriving show]
+
 type taint_spec = {
   sources : taint_source list;
   propagators : taint_propagator list;
-  sanitizers : sanitizer_spec list;
+  sanitizers : taint_sanitizer list;
   sinks : taint_sink list;
 }
 [@@deriving show]

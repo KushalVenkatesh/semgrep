@@ -843,8 +843,8 @@ let parse_taint_sanitizer env (key : key) (value : G.expr) =
     take_opt sanitizer_dict env parse_bool "not_conflicting"
     |> Option.value ~default:false
   in
-  let pformula = parse_formula env sanitizer_dict in
-  { R.not_conflicting; pformula }
+  let formula = parse_formula env sanitizer_dict in
+  { R.not_conflicting; formula }
 
 let parse_taint_sink env (key : key) (value : G.expr) : Rule.taint_sink =
   let sink_dict = yaml_to_dict env key value in
