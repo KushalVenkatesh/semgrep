@@ -828,6 +828,7 @@ let parse_taint_requires env key x =
         | G.Or ->
             ()
         | _ -> parse_error ())
+    | G.ParenExpr (_, e, _) -> check e
     | ___else__ -> parse_error ()
   and check_arg = function
     | G.Arg e -> check e
