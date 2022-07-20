@@ -327,13 +327,13 @@ let taint_config_of_rule default_config equivs file ast_and_errors
   let sources_ranges =
     find_range_w_metas config equivs xtarget rule
       (spec.sources
-      |> List.map (fun (src : Rule.taint_source) -> (src.formula, src)))
+      |> Common.map (fun (src : Rule.taint_source) -> (src.formula, src)))
   and propagators_ranges =
     find_propagators_matches config equivs xtarget rule spec.propagators
   and sinks_ranges =
     find_range_w_metas config equivs xtarget rule
       (spec.sinks
-      |> List.map (fun (sink : Rule.taint_sink) -> (sink.formula, sink)))
+      |> Common.map (fun (sink : Rule.taint_sink) -> (sink.formula, sink)))
   in
   let sanitizers_ranges =
     find_sanitizers_matches config equivs xtarget rule spec.sanitizers
