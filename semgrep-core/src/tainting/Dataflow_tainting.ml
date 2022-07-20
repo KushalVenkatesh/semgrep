@@ -394,10 +394,9 @@ let check_tainted_var env (var : IL.name) : Taints.t * var_env =
         add_taint_to_var_in_env env.var_env var taints_sources_mut
       in
       let taints_sources = Taints.union taints_sources_reg taints_sources_mut in
+      let prev_taints = Taints.union taints_var_env taints_fun_env in
       let taints : Taints.t =
-        taints_var_env
-        |> Taints.union taints_fun_env
-        |> union_taints_filtering_labels ~new_:taints_sources
+        prev_taints |> union_taints_filtering_labels ~new_:taints_sources
       in
       let taints, var_env' =
         handle_taint_propagators

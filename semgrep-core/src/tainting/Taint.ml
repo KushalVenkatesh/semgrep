@@ -103,6 +103,14 @@ let src_of_pm (pm, x) = Src (PM (pm, x))
 let taint_of_pm pm = { orig = src_of_pm pm; tokens = [] }
 let taints_of_pms pms = pms |> Common.map taint_of_pm |> Taint_set.of_list
 
+(* USEFUL FOR DEBUGGING *)
+let _show_taint_label taint =
+  match taint.orig with
+  | Arg i -> Printf.sprintf "arg#%d" i
+  | Src src ->
+      let _, ts = pm_of_trace src in
+      ts.label
+
 let show_taints taints =
   taints |> Taint_set.elements |> Common.map show_taint |> String.concat ", "
   |> fun str -> "{ " ^ str ^ " }"
